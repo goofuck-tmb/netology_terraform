@@ -1,159 +1,130 @@
-# Домашнее задание к лекции "Продвинутые методы работы с Terraform"
+# Домашнее задание к занятию "Использование Terraform в команде"
 
-Terraform + Yandex Cloud. Код в папке `terraform/`.
+Код в папке `terraform/`, код для задания 4 в `task4/`.
 
 ## Задание 1
 
-Две ВМ через remote-модуль `udjin10/yandex_compute_instance` - `marketing_vm` и `analytics_vm` (`vms.tf`), принадлежность проекту через `labels`.
-SSH-ключ в `cloud-init.yml` передается через переменную `vms_ssh_root_key` в `data "template_file"` (блок `vars`), в `cloud-init.yml` добавил установку nginx.
+Проверил код из 04/src и 04/demonstration1 через tflint и checkov (запускал в докере).
 
-Подключение и `sudo nginx -t`:
-
-![marketing](screenshots/1-1.png)
-
-![analytics](screenshots/1-2.png)
-
-ВМ с метками в консоли YC:
-
-![labels](screenshots/1-3.png)
-
-`terraform console` (вывод сокращен, блок `all` убрал):
+tflint:
 ```
-> module.marketing_vm
-{
-  "all" = [ ... ]
-  "external_ip_address" = [
-    "111.88.241.82",
-  ]
-  "fqdn" = [
-    "marketing-marketing-0.ru-central1.internal",
-  ]
-  "internal_ip_address" = [
-    "10.0.1.17",
-  ]
-  "labels" = [
-    tomap({
-      "owner" = "m.trishin"
-      "project" = "marketing"
-    }),
-  ]
-  "network_interface" = [ ... ]
-}
+docker run --rm -v "$(pwd):/data" -t ghcr.io/terraform-linters/tflint --chdir=/data
 ```
+checkov:
+```
+docker run --rm --tty --volume $(pwd):/tf --workdir /tf bridgecrew/checkov --download-external-modules true --directory /tf
+```
+
+Типы ошибок (без дублей):
+- `terraform_required_providers` - у провайдеров не указана версия (yandex, template, random)
+- `terraform_unused_declarations` - объявлены переменные, которые нигде не используются
+- `terraform_module_pinned_source` / `CKV_TF_1` / `CKV_TF_2` - модуль подключен по ветке main, а не по коммиту или тегу
+- `CKV_YC_2` - у ВМ есть публичный IP
+- `CKV_YC_11` - на сетевой интерфейс ВМ не назначена security group
 
 ## Задание 2
 
-Локальный модуль `terraform/vpc` - создает сеть и подсеть, отдает их через output. Ресурсы сети в корне заменил вызовом модуля, модули ВМ берут `network_id` и подсеть из outputs модуля.
-Чтобы сеть не пересоздавалась, перенес ресурсы в стейте через `terraform state mv`.
+Сделал ветку terraform-05 из terraform-04.
 
-![module.vpc](screenshots/2-1.png)
+Создал бакет `terraform-state-tm` в Object Storage, сервисный аккаунт с правами на бакет и статический ключ:
 
-Документация модуля (terraform-docs): [terraform/vpc/README.md](terraform/vpc/README.md)
+![bucket](screenshots/2-1.png)
+
+В `providers.tf` добавил backend s3 с `use_lockfile = true` (блок как в задании). Ключи доступа в код не писал, они лежат в отдельном файле `secret.backend.tfvars`, который добавлен в .gitignore. Миграция:
+```
+terraform init -backend-config=secret.backend.tfvars -migrate-state
+```
+
+![migrate](screenshots/2-2.png)
+
+State в бакете:
+
+![state](screenshots/2-3.png)
+
+Проверка блокировки. terraform console в новой версии terraform блокировку не держит, поэтому проверял так: в одном окне `terraform apply` и не отвечал на вопрос, во втором окне `terraform plan`:
+```
+Error: Error acquiring the state lock
+
+Error message: operation error S3: PutObject, https response error StatusCode: 412, RequestID:
+9c302a1fddf970f8, HostID: , api error PreconditionFailed: At least one of the pre-conditions you
+specified did not hold
+Lock Info:
+  ID:        8f6d99ff-25c0-c4df-50c9-cf49c533896c
+  Path:      terraform-state-tm/terraform.tfstate
+  Operation: OperationTypeApply
+  Who:       maximt@maximt-Zenbook-15
+  Version:   1.16.2
+  Created:   2026-10-04 21:07:41.574377174 +0000 UTC
+  Info:
+```
+
+![lock](screenshots/2-4.png)
+
+Разблокировка:
+```
+$ terraform force-unlock 8f6d99ff-25c0-c4df-50c9-cf49c533896c
+Do you really want to force-unlock?
+  Terraform will remove the lock on the remote state.
+  This will allow local Terraform commands to modify this state, even though it
+  may still be in use. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+Terraform state has been successfully unlocked!
+
+The state has been unlocked, and Terraform commands should now be able to
+obtain a new lock on the remote state.
+```
+
+![unlock](screenshots/2-5.png)
 
 ## Задание 3
 
-1. Список ресурсов в стейте:
-```
-$ terraform state list
-data.template_file.cloudinit
-module.analytics_vm.data.yandex_compute_image.my_image
-module.analytics_vm.yandex_compute_instance.vm[0]
-module.marketing_vm.data.yandex_compute_image.my_image
-module.marketing_vm.yandex_compute_instance.vm[0]
-module.vpc.yandex_vpc_network.develop
-module.vpc.yandex_vpc_subnet.develop
-```
+Ветку terraform-hotfix сделал на GitHub из terraform-05, проверил код tflint и checkov и исправил:
+- добавил версии провайдеров yandex и template (в корне и в модуле vpc)
+- удалил неиспользуемые переменные vm_web_name и vm_db_name
+- модуль ВМ подключил по хешу коммита вместо ветки main
+- убрал публичный IP у ВМ
+- добавил security group (ssh только из своих подсетей) и подключил ее к ВМ
 
-Перед удалением записал ID ресурсов (`terraform state show <адрес>`):
+После исправлений tflint ошибок не показывает, checkov: `Passed checks: 11, Failed checks: 0`.
 
-| Адрес | ID |
-|---|---|
-| module.vpc.yandex_vpc_network.develop | enpqua94ah5jnn5ovrqu |
-| module.vpc.yandex_vpc_subnet.develop | e9b66frhd2t2siihahef |
-| module.marketing_vm.yandex_compute_instance.vm[0] | fhmaegm9kcshcv9i6rkk |
-| module.analytics_vm.yandex_compute_instance.vm[0] | fhmhvqkrgfouump3eunu |
+PR (вывод tflint, checkov и terraform plan в комментарии): https://github.com/goofuck-tmb/netology_terraform/pull/1
 
-2. Удалил из стейта модуль vpc:
-```
-$ terraform state rm module.vpc
-Removed module.vpc.yandex_vpc_network.develop
-Removed module.vpc.yandex_vpc_subnet.develop
-Successfully removed 2 resource instance(s).
-```
+## Задание 4
 
-3. Удалил из стейта модули vm:
-```
-$ terraform state rm module.analytics_vm
-Removed module.analytics_vm.data.yandex_compute_image.my_image
-Removed module.analytics_vm.yandex_compute_instance.vm[0]
-Successfully removed 2 resource instance(s).
+```hcl
+variable "ip_address" {
+  type        = string
+  description = "ip-адрес"
+  default     = "192.168.0.1"
 
-$ terraform state rm module.marketing_vm
-Removed module.marketing_vm.data.yandex_compute_image.my_image
-Removed module.marketing_vm.yandex_compute_instance.vm[0]
-Successfully removed 2 resource instance(s).
+  validation {
+    condition     = can(cidrhost("${var.ip_address}/32", 0))
+    error_message = "Неверный IP-адрес."
+  }
+}
 
-$ terraform state list
-data.template_file.cloudinit
+variable "ip_list" {
+  type        = list(string)
+  description = "список ip-адресов"
+  default     = ["192.168.0.1", "1.1.1.1", "127.0.0.1"]
+
+  validation {
+    condition     = alltrue([for ip in var.ip_list : can(cidrhost("${ip}/32", 0))])
+    error_message = "В списке есть неверный IP-адрес."
+  }
+}
 ```
 
-4. Импортировал обратно:
-```
-$ terraform import 'module.vpc.yandex_vpc_network.develop' enpqua94ah5jnn5ovrqu
-Import successful!
-$ terraform import 'module.vpc.yandex_vpc_subnet.develop' e9b66frhd2t2siihahef
-Import successful!
-$ terraform import 'module.marketing_vm.yandex_compute_instance.vm[0]' fhmaegm9kcshcv9i6rkk
-Import successful!
-$ terraform import 'module.analytics_vm.yandex_compute_instance.vm[0]' fhmhvqkrgfouump3eunu
-Import successful!
-```
+Верные значения:
 
-Проверка:
-```
-$ terraform plan
-  # module.analytics_vm.yandex_compute_instance.vm[0] will be updated in-place
-  ~ resource "yandex_compute_instance" "vm" {
-      + allow_stopping_for_update = true
-        id                        = "fhmhvqkrgfouump3eunu"
-    }
-  # module.marketing_vm.yandex_compute_instance.vm[0] will be updated in-place
-  ~ resource "yandex_compute_instance" "vm" {
-      + allow_stopping_for_update = true
-        id                        = "fhmaegm9kcshcv9i6rkk"
-    }
+![ok](screenshots/4-1.png)
 
-Plan: 0 to add, 2 to change, 0 to destroy.
-```
-Значимых изменений нет - ничего не создается и не удаляется. `allow_stopping_for_update` - настройка самого терраформа, в облаке она не хранится, поэтому после импорта ее нет в стейте.
+Неверные значения передавал через -var:
 
-## Задание 4*
+![bad ip](screenshots/4-2.png)
 
-Модуль vpc принимает список подсетей `subnets` (`list(object({zone, cidr}))`), подсети создаются через `for_each`. Зона `ru-central1-c` в YC закрыта, поэтому взял a, b, d.
-Существующую подсеть перенес на новый адрес, чтобы не пересоздавать:
-```
-$ terraform state mv 'module.vpc.yandex_vpc_subnet.develop' 'module.vpc.yandex_vpc_subnet.develop["ru-central1-a"]'
-```
+![bad list](screenshots/4-3.png)
 
-План:
-```
-$ terraform plan
-  # module.vpc.yandex_vpc_subnet.develop["ru-central1-a"] will be updated in-place
-      ~ name = "develop" -> "develop-ru-central1-a"
-  # module.vpc.yandex_vpc_subnet.develop["ru-central1-b"] will be created
-      + name           = "develop-ru-central1-b"
-      + v4_cidr_blocks = ["10.0.2.0/24"]
-      + zone           = "ru-central1-b"
-  # module.vpc.yandex_vpc_subnet.develop["ru-central1-d"] will be created
-      + name           = "develop-ru-central1-d"
-      + v4_cidr_blocks = ["10.0.3.0/24"]
-      + zone           = "ru-central1-d"
-
-Plan: 2 to add, 3 to change, 0 to destroy.
-```
-
-Результат в консоли YC:
-
-![subnets](screenshots/4-1.png)
-
-Все ресурсы после проверки удалены `terraform destroy`.
+Все ресурсы после проверки удалены.
