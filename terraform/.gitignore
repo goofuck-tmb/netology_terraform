@@ -11,3 +11,5 @@
 # own secret vars store.
 personal.auto.tfvars
 secret.backend.tfvars
+# checkov downloads
+.external_modules/
